@@ -69,7 +69,7 @@ sys_n = 1 << gfbits
 sys_n_8 = sys_n / 8
 sys_t = 128
 sys_t_1 = sys_t + 1
-cond_bytes = (1 << (gfbits - 4)) * (2 * gfbits - 1)
+cond_bytes = (1 << (gfbits - 4)) * (gfbits * 2 - 1)
 r_bytes = sys_t * 2
 pk_nrows = sys_t * gfbits
 row_bytes = uint32_t((sys_n - pk_nrows + 7) / 8)
@@ -102,6 +102,15 @@ function load4 (a, ai=0) {
   return b
 }
 
+function load8 (a, ai=0) {
+  let b = big(a[ai + 7]), i = 6
+  for (; i >= 0; i--) {
+    b <<= 8n
+    b |= big(a[ai + i])
+  }
+  return b
+}
+
 function store8 (a, b, ai=0) {
   a[ai] = num((b >> 0n) & 255n)
   a[ai + 1] = num((b >> 8n) & 255n)
@@ -111,15 +120,6 @@ function store8 (a, b, ai=0) {
   a[ai + 5] = num((b >> 40n) & 255n)
   a[ai + 6] = num((b >> 48n) & 255n)
   a[ai + 7] = num((b >> 56n) & 255n)
-}
-
-function load8 (a, ai=0) {
-  let b = big(a[ai + 7]), i = 6
-  for (; i >= 0; i--) {
-    b <<= 8n
-    b |= big(a[ai + i])
-  }
-  return b
 }
 
 function bitrev (a) {
@@ -132,6 +132,9 @@ function bitrev (a) {
 
 function transpose (a, b) {
   let d, e, f, i, j, k, l, m, n, s, t, u
+  for (i = 0; i < 64; i++) {
+    a[i] = b[i]
+  }
   const m0 = [
     0x5555555555555555n,
     0x3333333333333333n,
@@ -148,15 +151,12 @@ function transpose (a, b) {
     0xFFFF0000FFFF0000n,
     0xFFFFFFFF00000000n
   ]
-  for (i = 0; i < 64; i++) {
-    a[i] = b[i]
-  }
   for (d = 5; d >= 0; d--) {
+    m = m0[d]
+    n = m1[d]
     s = 1 << d
     t = s * 2
     u = big(s)
-    m = m0[d]
-    n = m1[d]
     for (i = 0; i < 64; i += t) {
       for (j = i, l = i + s; j < l; j++) {
         k = j + s
@@ -172,7 +172,7 @@ function transpose (a, b) {
 function layer_in (a0, a1, b, l) {
   let c = 0, d, i, j, k, s = 1 << l, t = s * 2
   for (i = 0; i < 64; i += t) {
-    for (j = i; j < i + s; j++) {
+    for (j = i, l = i + s; j < l; j++) {
       k = j + s
       d = a0[j] ^ a0[k]
       d &= b[c++] | 0n
@@ -292,14 +292,144 @@ function support_gen (a, b, bi) {
   for (j = 0; j < gfbits; j++) {
     l[j] = apply_benes(l[j], b, bi)
   }
-  for (i = 0; i < sys_n; i++) {
+  for (f = gfbits - 1, i = 0; i < sys_n; i++) {
     a[i] = 0
     g = i % 8
     h = uint32_t(i / 8)
-    for (j = gfbits - 1; j >= 0; j--) {
+    for (j = f; j >= 0; j--) {
       a[i] <<= 1
       a[i] |= (l[j][h] >> g) & 1
     }
+  }
+}
+
+function gf_iszero (a) {
+  return (a - 1) >>> 19
+}
+
+function gf_mul (a, b) {
+  a = big(a)
+  b = big(b)
+  let i, j, l, t
+  j = a * (b & 1n)
+  for (i = 1n, l = big(gfbits); i < l; i++) {
+    j ^= a * (b & (1n << i))
+  }
+  t = j & 0x1FF0000n
+  j ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
+  t = j & 0x000E000n
+  j ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
+  return uint16_t(num(j) & gfmask)
+}
+
+function gf_sq2 (a) {
+  a = big(a)
+  const b = [
+    0x1111111111111111n,
+    0x0303030303030303n,
+    0x000F000F000F000Fn,
+    0x000000FF000000FFn
+  ]
+  const m = [
+    0x0001FF0000000000n,
+    0x000000FF80000000n,
+    0x000000007FC00000n,
+    0x00000000003FE000n
+  ]
+  a = (a | (a << 24n)) & b[3]
+  a = (a | (a << 12n)) & b[2]
+  a = (a | (a << 6n)) & b[1]
+  a = (a | (a << 3n)) & b[0]
+  let i = 0, t
+  for (; i < 4; i++) {
+    t = a & m[i]
+    a ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
+  }
+  return uint16_t(num(a & bgfmask))
+}
+
+function gf_sqmul (a, b) {
+  a = BigInt(a)
+  b = BigInt(b)
+  let i, t, x
+  x = (b << 6n) * (a & 64n)
+  a ^= a << 7n
+  x ^= b * (a & 0x04001n)
+  x ^= (b * (a & 0x08002n)) << 1n
+  x ^= (b * (a & 0x10004n)) << 2n
+  x ^= (b * (a & 0x20008n)) << 3n
+  x ^= (b * (a & 0x40010n)) << 4n
+  x ^= (b * (a & 0x80020n)) << 5n
+  const m = [
+    0x0000001FF0000000n,
+    0x000000000FF80000n,
+    0x000000000007E000n
+  ]
+  for (i = 0; i < 3; i++) {
+    t = x & m[i]
+    x ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
+  }
+  return uint16_t(num(x & bgfmask))
+}
+
+function gf_sq2mul (a, b) {
+  a = BigInt(a)
+  b = BigInt(b)
+  let i, t, x
+  x = (b << 18n) * (a & BigInt(1 << 6))
+  a ^= a << 21n
+  x ^= b * (a & 0x010000001n)
+  x ^= (b * (a & 0x020000002n)) << 3n
+  x ^= (b * (a & 0x040000004n)) << 6n
+  x ^= (b * (a & 0x080000008n)) << 9n
+  x ^= (b * (a & 0x100000010n)) << 12n
+  x ^= (b * (a & 0x200000020n)) << 15n
+  const m = [
+    0x1FF0000000000000n,
+    0x000FF80000000000n,
+    0x000007FC00000000n,
+    0x00000003FE000000n,
+    0x0000000001FE0000n,
+    0x000000000001E000n
+  ]
+  for (i = 0; i < 6; i++) {
+    t = x & m[i]
+    x ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
+  }
+  return uint16_t(num(x & bgfmask))
+}
+
+function gf_frac (a, b) {
+  a = gf_sqmul(a, a)
+  a = gf_sq2mul(a, a)
+  let c = gf_sq2(a)
+  c = gf_sq2mul(c, a)
+  c = gf_sq2(c)
+  c = gf_sq2mul(c, a)
+  return gf_sqmul(c, b)
+}
+
+function gf_inv (a) {
+  return gf_frac(a, 1)
+}
+
+function mul_gf (a, b, c) {
+  const d = uint16(r_bytes - 1)
+  let i, j
+  for (i = 0; i < sys_t; i++) {
+    for (j = 0; j < sys_t; j++) {
+      d[i + j] ^= gf_mul(b[i], c[j])
+    }
+  }
+  for (i = (sys_t - 1) * 2; i >= sys_t; i--) {
+    j = i - sys_t
+    d[j + 7] ^= d[i]
+    d[j + 2] ^= d[i]
+    d[j + 1] ^= d[i]
+    d[j] ^= d[i]
+  }
+  for (i = 0; i < sys_t; i++) {
+    a[i] = d[i]
   }
 }
 
@@ -308,25 +438,25 @@ function min (a, b) {
 }
 
 function bm (a, b) {
-  let d, f, i, m0, m1, n
-  let e = 1, l = 0
   const c = uint16(sys_t_1)
   const s = uint16(sys_t_1)
   const t = uint16(sys_t_1)
   const m = uint16(2)
   c[0] = s[1] = 1
-  for (n = 0; n < 2 * sys_t; n++) {
+  let d, f, g, h, i, m0, m1, n
+  let e = 1, l = 0
+  for (n = 0, g = sys_t * 2; n < g; n++) {
     d = 0
-    for (i = 0; i <= min(n, sys_t); i++) {
+    for (i = 0, h = min(n, sys_t); i <= h; i++) {
       d ^= gf_mul(c[i], b[n - i])
     }
     m[0] = d - 1
-    m[0] = m[0] >> 15
-    m[0] = m0 = m[0] - 1
-    m[1] = n - 2 * l
-    m[1] = m[1] >> 15
-    m[1] = m[1] - 1
-    m[1] = m1 = m[1] & m[0]
+    m[0] >>= 15
+    m0 = m[0] -= 1
+    m[1] = n - l * 2
+    m[1] >>= 15
+    m[1] -= 1
+    m1 = m[1] &= m0
     for (i = 0; i <= sys_t; i++) {
       t[i] = c[i]
     }
@@ -377,12 +507,8 @@ function uint32_nonzero_mask (a) {
   return uint32_signed_negative_mask(a) | uint32_signed_negative_mask(-a)
 }
 
-function uint32_unequal_mask (a, b) {
-  return uint32_nonzero_mask(a ^ b)
-}
-
 function uint32_equal_mask (a, b) {
-  return ~uint32_unequal_mask(a, b)
+  return ~uint32_nonzero_mask(a ^ b)
 }
 
 function uint64_signed_negative_mask (a) {
@@ -393,146 +519,12 @@ function uint64_nonzero_mask (a) {
   return uint64_signed_negative_mask(a) | uint64_signed_negative_mask(-a)
 }
 
-function uint64_unequal_mask (a, b) {
-  return uint64_nonzero_mask(a ^ b)
-}
-
 function uint64_equal_mask (a, b) {
-  return ~uint64_unequal_mask(a, b)
+  return ~uint64_nonzero_mask(a ^ b)
 }
 
 function uint64_zero_mask (a) {
   return ~uint64_nonzero_mask(big(a))
-}
-
-function gf_iszero (a) {
-  return (a - 1) >>> 19
-}
-
-function gf_mul (a, b) {
-  let i, j, l, t
-  a = big(a)
-  b = big(b)
-  j = a * (b & 1n)
-  for (i = 1n, l = big(gfbits); i < l; i++) {
-    j ^= a * (b & (1n << i))
-  }
-  t = j & 0x1FF0000n
-  j ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
-  t = j & 0x000E000n
-  j ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
-  return uint16_t(num(j) & gfmask)
-}
-
-function gf_sq2 (a) {
-  a = big(a)
-  let i, t
-  const b = [
-    0x1111111111111111n,
-    0x0303030303030303n,
-    0x000F000F000F000Fn,
-    0x000000FF000000FFn
-  ]
-  const m = [
-    0x0001FF0000000000n,
-    0x000000FF80000000n,
-    0x000000007FC00000n,
-    0x00000000003FE000n
-  ]
-  a = (a | (a << 24n)) & b[3]
-  a = (a | (a << 12n)) & b[2]
-  a = (a | (a << 6n)) & b[1]
-  a = (a | (a << 3n)) & b[0]
-  for (i = 0; i < 4; i++) {
-    t = a & m[i]
-    a ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
-  }
-  return uint16_t(num(a & bgfmask))
-}
-
-function gf_sqmul (a, b) {
-  let i, t, x
-  const m = [
-    0x0000001FF0000000n,
-    0x000000000FF80000n,
-    0x000000000007E000n
-  ]
-  a = BigInt(a)
-  b = BigInt(b)
-  x = (b << 6n) * (a & 64n)
-  a ^= a << 7n
-  x ^= b * (a & 0x04001n)
-  x ^= (b * (a & 0x08002n)) << 1n
-  x ^= (b * (a & 0x10004n)) << 2n
-  x ^= (b * (a & 0x20008n)) << 3n
-  x ^= (b * (a & 0x40010n)) << 4n
-  x ^= (b * (a & 0x80020n)) << 5n
-  for (i = 0; i < 3; i++) {
-    t = x & m[i]
-    x ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
-  }
-  return uint16_t(num(x & bgfmask))
-}
-
-function gf_sq2mul (a, b) {
-  let i, t, x
-  const m = [
-    0x1FF0000000000000n,
-    0x000FF80000000000n,
-    0x000007FC00000000n,
-    0x00000003FE000000n,
-    0x0000000001FE0000n,
-    0x000000000001E000n
-  ]
-  a = BigInt(a)
-  b = BigInt(b)
-  x = (b << 18n) * (a & BigInt(1 << 6))
-  a ^= a << 21n
-  x ^= b * (a & 0x010000001n)
-  x ^= (b * (a & 0x020000002n)) << 3n
-  x ^= (b * (a & 0x040000004n)) << 6n
-  x ^= (b * (a & 0x080000008n)) << 9n
-  x ^= (b * (a & 0x100000010n)) << 12n
-  x ^= (b * (a & 0x200000020n)) << 15n
-  for (i = 0; i < 6; i++) {
-    t = x & m[i]
-    x ^= (t >> 9n) ^ (t >> 10n) ^ (t >> 12n) ^ (t >> 13n)
-  }
-  return uint16_t(num(x & bgfmask))
-}
-
-function gf_frac (a, b) {
-  a = gf_sqmul(a, a)
-  a = gf_sq2mul(a, a)
-  let c = gf_sq2(a)
-  c = gf_sq2mul(c, a)
-  c = gf_sq2(c)
-  c = gf_sq2mul(c, a)
-  return gf_sqmul(c, b)
-}
-
-function gf_inv (a) {
-  return gf_frac(a, 1)
-}
-
-function mul_gf (a, b, c) {
-  let i, j
-  const d = uint16(r_bytes - 1)
-  for (i = 0; i < sys_t; i++) {
-    for (j = 0; j < sys_t; j++) {
-      d[i + j] ^= gf_mul(b[i], c[j])
-    }
-  }
-  for (i = (sys_t - 1) * 2; i >= sys_t; i--) {
-    j = i - sys_t
-    d[j + 7] ^= d[i]
-    d[j + 2] ^= d[i]
-    d[j + 1] ^= d[i]
-    d[j] ^= d[i]
-  }
-  for (i = 0; i < sys_t; i++) {
-    a[i] = d[i]
-  }
 }
 
 function memcpy (a, b, c, ai=0, bi=0) {
@@ -551,10 +543,10 @@ function memcpy (a, b, c, ai=0, bi=0) {
 }
 
 function int32_minmax (a, b) {
-  const ab = b ^ a
-  let c = b - a
-  c ^= ab & (c ^ b)
-  return (c >> 31) & ab
+  const c = b ^ a
+  let d = b - a
+  d ^= c & (d ^ b)
+  return (d >> 31) & c
 }
 
 function int32_sort (a, b, ai=0) {
@@ -595,20 +587,11 @@ function int32_sort (a, b, ai=0) {
   }
 }
 
-function int32_min (a, b) {
-  const c = b ^ a
-  let d = b - a
-  d ^= c & (d ^ b)
-  d >>= 31
-  d &= c
-  return a ^ d
-}
-
-function cbrecursion (a, p, q, s, r, w, n, b) {
-  let c, d, e, f, i, j, k, l, u, x, y
-  const n2 = n / 2, n4 = n / 4, qi = n + n4
+function cbrecursion (a, p, pi, s, r, w, n, b) {
+  let e, f, i, j, k, l
+  const g = n / 2
   if (w == 1) {
-    a[p + (q >> 3)] ^= r[0] << (q & 7)
+    a[p + (pi >> 3)] ^= r[0] << (pi & 7)
     return
   }
   for (i = 0; i < n; ++i) {
@@ -616,10 +599,9 @@ function cbrecursion (a, p, q, s, r, w, n, b) {
   }
   int32_sort(b, n)
   for (i = 0; i < n; ++i) {
-    d = b[i]
-    f = d & 0xffff
-    e = int32_min(f, i)
-    b[i + n] = (f << 16) | e
+    e = b[i] & 0xffff
+    f = e ^ int32_minmax(e, i)
+    b[i + n] = (e << 16) | f
   }
   for (i = 0; i < n; ++i) {
     b[i] = ((b[i] << 16) | i)
@@ -643,9 +625,9 @@ function cbrecursion (a, p, q, s, r, w, n, b) {
       }
       int32_sort(b, n)
       for (j = 0; j < n; ++j) {
-        u = b[j] & 0xfffff
-        c = (b[j] & 0xffc00) | (b[j + n] & 0x3ff)
-        b[j + n] = int32_min(c, u)
+        e = b[j] & 0xfffff
+        f = (b[j] & 0xffc00) | (b[j + n] & 0x3ff)
+        b[j + n] = f ^ int32_minmax(f, e)
       }
     }
     for (i = 0; i < n; ++i) {
@@ -674,8 +656,8 @@ function cbrecursion (a, p, q, s, r, w, n, b) {
       }
       int32_sort(b, n)
       for (j = 0; j < n; ++j) {
-        u = (b[j + n] & ~0xffff) | (b[j] & 0xffff)
-        b[j + n] = int32_min(b[j + n], u)
+        e = (b[j + n] & ~0xffff) | (b[j] & 0xffff)
+        b[j + n] ^= int32_minmax(b[j + n], e)
       }
     }
     for (j = 0; j < n; ++j) {
@@ -687,40 +669,40 @@ function cbrecursion (a, p, q, s, r, w, n, b) {
   }
   int32_sort(b, n)
   let fi, fj
-  for (j = 0; j < n2; ++j) {
-    x = 2 * j
-    fi = b[x + n] & 1
-    fj = x + fi
-    a[p + (q >> 3)] ^= fi << (q & 7)
-    q += s
-    b[x + n] = (b[x] << 16) | fj
-    b[x] = b[x + 1]
-    b[x + n + 1] = (b[x] << 16) | (fj ^ 1)
+  for (i = 0; i < g; ++i) {
+    j = i * 2
+    fi = b[j + n] & 1
+    fj = j + fi
+    a[p + (pi >> 3)] ^= fi << (pi & 7)
+    pi += s
+    b[j + n] = (b[j] << 16) | fj
+    b[j] = b[j + 1]
+    b[j + n + 1] = (b[j] << 16) | (fj ^ 1)
   }
   int32_sort(b, n, n)
-  q += (2 * w - 3) * s * n2
-  let lk, lx, ly
-  for (k = 0; k < n2; ++k) {
-    y = 2 * k
-    by = y + n
-    lk = b[by] & 1
-    lx = y + lk
-    ly = lx ^ 1
-    a[p + (q >> 3)] ^= lk << (q & 7)
-    q += s
-    b[y] = (lx << 16) | (b[by] & 0xffff)
-    b[y + 1] = (ly << 16) | (b[by + 1] & 0xffff)
+  t = (w * 2 - 3) * s * g
+  pi += t
+  let x, y
+  for (i = 0; i < g; ++i) {
+    j = i * 2
+    k = j + n
+    x = b[k] & 1
+    y = j + x
+    a[p + (pi >> 3)] ^= x << (pi & 7)
+    pi += s
+    b[j] = (y << 16) | (b[k] & 0xffff)
+    b[j + 1] = ((y ^ 1) << 16) | (b[k + 1] & 0xffff)
   }
   int32_sort(b, n)
-  q -= (2 * w - 2) * s * n2
-  r = int16(b.slice(qi).length * 2)
-  for (j = 0; j < n2; ++j) {
-    k = j * 2
-    r[j] = (b[k] & 0xffff) >> 1
-    r[j + n2] = (b[k + 1] & 0xffff) >> 1
+  r = int16((b.length - (n + n / 4)) * 2)
+  for (i = 0; i < g; ++i) {
+    j = i * 2
+    r[i] = (b[j] & 0xffff) >> 1
+    r[i + g] = (b[j + 1] & 0xffff) >> 1
   }
-  cbrecursion(a, p, q, s * 2, r, w - 1, n2, b)
-  cbrecursion(a, p, q + s, s * 2, r.slice(n2), w - 1, n2, b)
+  pi -= t + s * g
+  cbrecursion(a, p, pi, s * 2, r, w - 1, g, b)
+  cbrecursion(a, p, pi + s, s * 2, r.slice(g), w - 1, g, b)
 }
 
 function layer (a, b, p, s, n) {
@@ -747,8 +729,8 @@ function memset (a, p, v, b) {
 
 function control (a, b, w, n) {
   const p = int16(n)
-  const t = int32(2 * n)
-  const n4 = n >> 4, v = (((2 * w - 1) * n / 2) + 7) / 8
+  const t = int32(n * 2)
+  const j = n >> 4, v = (((w * 2 - 1) * n / 2) + 7) / 8
   let d, i, r = 0
   while (1) {
     memset(a, r, 0, v)
@@ -758,11 +740,11 @@ function control (a, b, w, n) {
     }
     for (i = 0; i < w; i++) {
       layer(p, a, r, i, n)
-      r += n4
+      r += j
     }
     for (i = w - 2; i >= 0; i--) {
       layer(p, a, r, i, n)
-      r += n4
+      r += j
     }
     d = 0
     for (i = 0; i < n; i++) {
@@ -799,7 +781,6 @@ function genpoly_gen (a, f) {
   }
   m[0][0] = 1
   for (i = 1; i < sys_t; i++) {
-    m[0][i] = 0
     m[1][i] = f[i]
   }
   m[1][0] = f[0]
@@ -839,7 +820,7 @@ function genpoly_gen (a, f) {
 
 function synd (a, f, l, r) {
   let c, d, e, i, j
-  const t = 2 * sys_t
+  const t = sys_t * 2
   a.fill(0, 0, t)
   for (i = 0; i < sys_n; i++) {
     c = (r[uint32_t(i / 8)] >> (i % 8)) & 1
@@ -867,7 +848,7 @@ function uint64_sort (a, b) {
     t += t
   }
   for (p = t; p > 0; p >>= 1) {
-    for (i = 0; i < b - p; ++i) {
+    for (i = 0, l = b - p; i < l; ++i) {
       if (!(i & p)) {
         j = i + p
         c = uint64_minmax(a[i], a[j])
@@ -973,7 +954,7 @@ function mov_columns (a, b, p=0n) {
   return p
 }
 
-function pk_gen (pk, sk, q, h, o, p) {
+function pk_gen (p, s, si, h, o, v) {
   let b, c, d, i, j, k, r, t
   const f = uint64(sys_n)
   const m = []
@@ -985,8 +966,8 @@ function pk_gen (pk, sk, q, h, o, p) {
   const n = uint16(sys_n)
   g[sys_t] = 1
   for (i = 0; i < sys_t; i++) {
-    g[i] = load_gf(sk, q)
-    q += 2
+    g[i] = load_gf(s, si)
+    si += 2
   }
   for (i = 0; i < sys_n; i++) {
     f[i] = big(h[i])
@@ -1025,7 +1006,6 @@ function pk_gen (pk, sk, q, h, o, p) {
       n[j] = gf_mul(n[j], l[j])
     }
   }
-  const s = sys_n_8
   for (i = 0, b = (pk_nrows + 7) / 8; i < b; i++) {
     h = i * 8
     for (j = 0; j < 8; j++) {
@@ -1033,9 +1013,9 @@ function pk_gen (pk, sk, q, h, o, p) {
       if (r >= pk_nrows) {
         break
       }
-      if (p >= 0n && r == pk_nrows - 32) {
-        p = mov_columns(m, o, p)
-        if (p < 0n) {
+      if (v >= 0n && r == pk_nrows - 32) {
+        v = mov_columns(m, o, v)
+        if (v < 0n) {
           return -1n
         }
       }
@@ -1044,7 +1024,7 @@ function pk_gen (pk, sk, q, h, o, p) {
         t >>= j
         t &= 1
         t = uint8_t(-t)
-        for (c = 0; c < s; c++) {
+        for (c = 0; c < sys_n_8; c++) {
           m[r][c] ^= m[k][c] & t
         }
       }
@@ -1056,7 +1036,7 @@ function pk_gen (pk, sk, q, h, o, p) {
           t = m[k][i] >> j
           t &= 1
           t = uint8_t(-t)
-          for (c = 0; c < s; c++) {
+          for (c = 0; c < sys_n_8; c++) {
             m[k][c] ^= m[r][c] & t
           }
         }
@@ -1064,9 +1044,9 @@ function pk_gen (pk, sk, q, h, o, p) {
     }
   }
   for (i = 0; i < pk_nrows; i++) {
-    memcpy(pk, m[i], row_bytes, i * row_bytes, synd_bytes)
+    memcpy(p, m[i], row_bytes, i * row_bytes, synd_bytes)
   }
-  return p
+  return v
 }
 
 function same_mask (a, b) {
@@ -1109,7 +1089,7 @@ function gen_e (a) {
   }
 }
 
-function syndrome (s, pk, e) {
+function syndrome (s, p, e) {
   let b, i, j, o = 0
   const r = uint8(sys_n_8)
   for (i = 0; i < synd_bytes; i++) {
@@ -1120,7 +1100,7 @@ function syndrome (s, pk, e) {
       r[j] = 0
     }
     for (j = 0; j < row_bytes; j++) {
-      r[j - row_bytes + sys_n_8] = pk[j + o]
+      r[j - row_bytes + sys_n_8] = p[j + o]
     }
     o += row_bytes
     r[uint32_t(i / 8)] |= 1 << (i % 8)
@@ -1136,26 +1116,26 @@ function syndrome (s, pk, e) {
   }
 }
 
-function decrypts (e, sk, q, c) {
+function decrypts (e, s, si, c) {
   let b, i, t, w = 0
   const r = uint8(sys_n_8)
   const g = uint16(sys_t_1)
   const l = uint16(sys_n)
-  const s = uint16(r_bytes)
-  const f = s.slice()
+  const p = uint16(r_bytes)
+  const f = p.slice()
   const m = l.slice()
   const o = g.slice()
   for (i = 0; i < synd_bytes; i++) {
     r[i] = c[i]
   }
   for (i = 0; i < sys_t; i++) {
-    g[i] = load_gf(sk, q)
-    q += 2
+    g[i] = load_gf(s, si)
+    si += 2
   }
   g[sys_t] = 1
-  support_gen(l, sk, q)
-  synd(s, g, l, r)
-  bm(o, s)
+  support_gen(l, s, si)
+  synd(p, g, l, r)
+  bm(o, p)
   root(m, o, l)
   for (i = 0; i < sys_n_8; i++) {
     e[i] = 0
@@ -1168,7 +1148,7 @@ function decrypts (e, sk, q, c) {
   synd(f, g, l, e)
   b = w ^ sys_t
   for (i = 0; i < r_bytes; i++) {
-    b |= s[i] ^ f[i]
+    b |= p[i] ^ f[i]
   }
   b -= 1
   b >>= 15
@@ -1178,7 +1158,7 @@ function decrypts (e, sk, q, c) {
 function pack (a) {
   let b = 0, c = a.length, d = []
   while (b < c) {
-    d.push(a[b++] ^ a[b++] << 8 ^ a[b++] << 16 ^ a[b++] << 24 >> 0)
+    d.push(a[b++] ^ a[b++] << 8 ^ a[b++] << 16 ^ a[b++] << 24)
   }
   return d
 }
@@ -1269,7 +1249,7 @@ function expand (a, g=a0, h=a1) {
     return b
   }
 
-  let p = 64n, q = g / p
+  const p = 64n, q = g / p
   i = o(n(i) + q, uint32(a16))
   j = o(n(j) + q, uint32(a16))
   m = g % p
@@ -1288,69 +1268,67 @@ function expand (a, g=a0, h=a1) {
   return a
 }
 
-function reduce (a, h=a1) {
+function reduces (a, h=a1) {
   while (a.length > a128) {
     a = [...expand(a.slice(a0, a128), a0, a64), ...a.slice(a128)]
   }
   return expand(a, a0, h)
 }
 
-function crypto_kem_keypair (pk, sk) {
+function crypto_kem_keypair (p, s) {
   const o = int16(sys_n)
   const l = sys_n_8 + sys_n * 4 + r_bytes + 32
   const r = uint8(l)
   const f = uint16(sys_t)
   const g = uint16(sys_t)
   const h = uint32(sys_n)
-  let i, p, q, ri
+  const j = 0n
+  let i, ri, si
   while (1) {
-    p = 0n
-    q = 40
     r.set(randombytes(l))
-    ri = l - 32 - f.length * 2
+    ri = l - f.length * 2 - 32
     for (i = 0; i < sys_t; i++) {
-      f[i] = load_gf(r, ri + i * 2)
+      f[i] = load_gf(r, i * 2 + ri)
     }
     if (genpoly_gen(g, f)) {
       continue
     }
+    si = 40
     for (i = 0; i < sys_t; i++) {
-      store_gf(sk, g[i], q + i * 2)
+      store_gf(s, g[i], i * 2 + si)
     }
-    q += r_bytes
+    si += r_bytes
     ri -= h.length * 4
     for (i = 0; i < sys_n; i++) {
-      h[i] = load4(r, ri + i * 4)
+      h[i] = load4(r, i * 4 + ri)
     }
-    p = pk_gen(pk, sk, q - r_bytes, h, o, p)
-    if (p < 0n) {
+    if (pk_gen(p, s, si - r_bytes, h, o, j) < 0n) {
       continue
     }
-    sk.set(control(sk.slice(), o, gfbits, sys_n).slice(0, secret_bytes - 296), 296)
-    q += cond_bytes
+    s.set(control(s.slice(), o, gfbits, sys_n).slice(0, secret_bytes - 296), 296)
+    si += cond_bytes
     ri -= sys_n_8
-    memcpy(sk, r, sys_n_8, q, ri)
-    store8(sk, p, 32)
+    memcpy(s, r, sys_n_8, si, ri)
     break
   }
 }
 
-function crypto_kem_enc (c, key, pk) {
-  const a = uint8(1 + sys_n_8 + synd_bytes)
+function crypto_kem_enc (c, k, p) {
+  const a = uint8(synd_bytes + sys_n_8 + 1)
   const e = uint8(sys_n_8)
   a[0] = 1
   gen_e(e)
-  syndrome(c, pk, e)
+  syndrome(c, p, e)
   memcpy(a, e, sys_n_8, 1)
-  memcpy(a, c, synd_bytes, 1 + sys_n_8)
-  key.set(reduce(a, 32))
+  memcpy(a, c, synd_bytes, sys_n_8 + 1)
+  k.set(reduces(a, 32))
 }
 
-function crypto_kem_dec (key, c, sk) {
-  const a = uint8(1 + sys_n_8 + synd_bytes)
+function crypto_kem_dec (k, c, s) {
   const e = uint8(sys_n_8)
-  const s = sk.slice(40 + r_bytes + cond_bytes)
-  const d = decrypts(e, sk, 40, c)
+  const a = uint8(synd_bytes + sys_n_8 + 1)
+  const d = decrypts(e, s, 40, c)
+  s = s.slice(cond_bytes + r_bytes + 40)
   if (d > 0) {
     return []
   }
@@ -1359,8 +1337,8 @@ function crypto_kem_dec (key, c, sk) {
   for (let i = 0, j = 1; i < sys_n_8; i++) {
     a[j++] = (~m & s[i]) | (m & e[i])
   }
-  memcpy(a, c, synd_bytes, 1 + sys_n_8)
-  key.set(reduce(a, 32))
+  memcpy(a, c, synd_bytes, sys_n_8 + 1)
+  k.set(reduces(a, 32))
 }
 
 priv = uint8(secret_bytes)
